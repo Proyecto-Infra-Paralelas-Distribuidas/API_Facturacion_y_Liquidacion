@@ -4,9 +4,30 @@
   <meta charset="utf-8">
   <title>Voltrix Energy · Facturación y Liquidación (Equipo 7)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>body{margin:0;font-family:Arial,sans-serif}#msg{padding:24px;color:#333}</style>
 </head>
 <body>
+  <div id="msg">Cargando el contrato…</div>
   <redoc spec-url="openapi.yaml"></redoc>
-  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+  <script>
+    var fuentes = [
+      "https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js",
+      "https://unpkg.com/redoc@2/bundles/redoc.standalone.js",
+      "https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"
+    ];
+    function cargar(i) {
+      if (i >= fuentes.length) {
+        document.getElementById("msg").innerHTML =
+          'No se pudo cargar el visor. Abre el contrato directamente: <a href="openapi.yaml">openapi.yaml</a>';
+        return;
+      }
+      var s = document.createElement("script");
+      s.src = fuentes[i];
+      s.onload = function () { document.getElementById("msg").style.display = "none"; };
+      s.onerror = function () { cargar(i + 1); };
+      document.body.appendChild(s);
+    }
+    cargar(0);
+  </script>
 </body>
 </html>
