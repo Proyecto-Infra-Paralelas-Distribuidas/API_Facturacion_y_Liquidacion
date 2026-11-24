@@ -1,0 +1,79 @@
+#!/bin/bash
+# Se ejecuta una sola vez al crear la instancia. El resultado queda en /var/log/user-data.log
+exec > /var/log/user-data.log 2>&1
+set -eux
+
+# 1) Swap (la instancia tiene 1 GiB de RAM)
+if [ ! -f /swapfile ]; then
+  dd if=/dev/zero of=/swapfile bs=1M count=$((${swap_gb} * 1024))
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
+# 2) Docker y plugin de compose
+dnf install -y docker
+systemctl enable --now docker
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" \
+  -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+# 3) Archivos de la aplicación
+mkdir -p /opt/liquidacion
+cd /opt/liquidacion
+
+cat > .env <<'ENV'
+IMAGEN=${imagen}
+DB_NAME=liquidacion
+DB_USER=liquidacion
+DB_PASSWORD=${db_password}
+TARIFA_POR_KWH=450
+MAX_CONCURRENT_JOBS=2
+URL_REPORTES=
+URL_MANTENIMIENTO=
+ENV
+chmod 600 .env
+
+cat > docker-compose.yml <<'COMPOSE'
+services:
+  api:
+    image: $${IMAGEN}
+    restart: unless-stopped
+    mem_limit: 400m
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/$${DB_NAME}
+      DB_USER: $${DB_USER}
+      DB_PASSWORD: $${DB_PASSWORD}
+      TARIFA_POR_KWH: $${TARIFA_POR_KWH}
+      MAX_CONCURRENT_JOBS: $${MAX_CONCURRENT_JOBS}
+      URL_REPORTES: $${URL_REPORTES}
+      URL_MANTENIMIENTO: $${URL_MANTENIMIENTO}
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_DB: $${DB_NAME}
+      POSTGRES_USER: $${DB_USER}
+      POSTGRES_PASSWORD: $${DB_PASSWORD}
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=20"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${DB_USER} -d $${DB_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  pgdata:
+COMPOSE
+
+# 4) Arrancar
+docker compose --env-file .env up -d

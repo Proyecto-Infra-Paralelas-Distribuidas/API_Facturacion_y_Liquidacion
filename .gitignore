@@ -1,0 +1,8 @@
+target/
+.env
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!terraform.tfvars.example
+.idea/

@@ -1,0 +1,561 @@
+# =============================================================================
+# CONTRATO OPENAPI · Voltrix Energy · Facturación y Liquidación (Equipo 7)
+# Basado en la plantilla común mantenida por el Equipo 1 (openapi-plantilla.yaml).
+# Las secciones marcadas COMÚN se conservan tal como están en la plantilla.
+# =============================================================================
+openapi: 3.0.3
+info:
+  title: Voltrix Energy · Facturación y Liquidación
+  version: 1.0.0
+  description: |
+    Contrato HTTP del servicio **Facturación y Liquidación** (Equipo 7). Calcula la liquidación periódica de energía entregada por planta y devuelve el total consolidado. Es el único servicio terminal de la plataforma: ningún otro servicio lo consume.
+
+    **Servicios que consume:** Reportes de Generación (Equipo 4), Mantenimiento Predictivo (Equipo 6).
+
+    **Consumidores previstos**
+
+    | Equipo | Servicio | Operaciones que usa |
+    |---|---|---|
+    | Ninguno | Servicio terminal | No aplica |
+
+    **Cálculo de la liquidación (supuestos del equipo, por confirmar)**
+
+    - El periodo es mensual y se escribe `AAAA-MM`. Para consultar a otros servicios se convierte en un rango RFC 3339 en zona horaria `-05:00` (del primer instante del mes al último).
+    - Energía entregada: se obtiene de Reportes de Generación (`GET /reportes/generacion`), por planta.
+    - Costo de mantenimiento: es la suma de `costoEstimado` (COP) de las órdenes de la planta con estado `completada` dentro del periodo, obtenidas de Mantenimiento Predictivo (`GET /mantenimiento/ordenes`, recorriendo todas las páginas).
+    - Tarifa: un valor por kWh en COP, tomado de la configuración del servicio.
+    - `total = energiaEntregadaKwh × tarifaPorKwh − costoMantenimiento`. El `totalConsolidado` es la suma de los totales de todas las plantas del periodo.
+
+    **Convenciones comunes a todos los equipos**
+
+    - Fechas en RFC 3339 **con zona horaria** (`2026-11-19T14:00:00Z`).
+    - Identificadores de plantas y activos según Inventario (Equipo 1): `PL-001`, `PL-001-PS-07`.
+    - Cada consumidor envía `X-Equipo-Consumidor: equipo-<N>`; toda respuesta incluye `X-Request-Id`.
+      Ambos se escriben en los logs como evidencia de consumo real.
+    - Errores con el esquema común `Error` (`codigo`, `mensaje`, `requestId`, `detalles`).
+    - `429` con `Retry-After` ante sobrecarga, `503` si la base de datos no responde y `502` si un
+      servicio de otro equipo del que se depende falla.
+    - `GET /health` y `GET /openapi.yaml` existen en todos los servicios.
+    - Las operaciones de procesamiento intensivo aceptan `modo` (`secuencial` | `paralelo`) y
+      `workers`, y devuelven `MetricasProcesamiento` para comparar ambas versiones.
+  contact:
+    name: Equipo 7 · Facturación y Liquidación
+servers: # COMÚN
+  - url: http://{host}:{puerto}
+    description: Despliegue del Componente B (EC2) o entorno local. La dirección vigente está en la hoja Coordinacion_Voltrix.
+    variables:
+      host:
+        default: localhost
+        description: IP pública o DNS de la instancia EC2.
+      puerto:
+        default: "8080"
+tags:
+  - name: Liquidaciones
+    description: Liquidaciones periódicas de energía entregada por planta y su total consolidado.
+  - name: Procesamiento
+    description: Generación de liquidaciones con descomposición de tareas por planta, en versión secuencial o paralela.
+  - name: Operación
+    description: Salud del servicio y publicación del contrato.
+
+paths:
+  /liquidaciones/generar:
+    post:
+      tags: [Procesamiento]
+      operationId: generarLiquidaciones
+      summary: Generar las liquidaciones de un periodo
+      description: |
+        Obtiene de Reportes de Generación (Equipo 4) la energía entregada y de Mantenimiento
+        Predictivo (Equipo 6) el costo de mantenimiento de cada planta del periodo. Cada planta es una
+        tarea independiente: con `modo=secuencial` se liquidan una tras otra (línea base) y con
+        `modo=paralelo` se reparten entre `workers` hilos (descomposición de tareas). Al terminar se
+        combinan los resultados en el total consolidado y se guardan.
+
+        Si el periodo ya tenía liquidaciones, se recalculan y reemplazan las anteriores.
+      parameters:
+        - $ref: '#/components/parameters/EquipoConsumidor'
+        - $ref: '#/components/parameters/Modo'
+        - $ref: '#/components/parameters/Workers'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolicitudLiquidacion'
+            example:
+              periodo: '2026-11'
+              plantaIds: [PL-001, PL-002]
+      responses:
+        '200':
+          description: Liquidaciones generadas.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultadoLiquidacion'
+              example:
+                periodo: '2026-11'
+                generados: 2
+                totalConsolidado: 8327725
+                moneda: COP
+                metricas:
+                  modo: paralelo
+                  workers: 4
+                  elementos: 2
+                  duracionMs: 18
+        '400':
+          $ref: '#/components/responses/SolicitudInvalida'
+        '429':
+          $ref: '#/components/responses/Sobrecarga'
+        '502':
+          $ref: '#/components/responses/DependenciaFallida'
+        '503':
+          $ref: '#/components/responses/NoDisponible'
+
+  /liquidaciones/{periodo}:
+    get:
+      tags: [Liquidaciones]
+      operationId: consultarLiquidaciones
+      summary: Consultar las liquidaciones generadas de un periodo
+      description: Devuelve una página de liquidaciones por planta, junto con el total consolidado de todo el periodo.
+      parameters:
+        - $ref: '#/components/parameters/PeriodoLiquidacion'
+        - $ref: '#/components/parameters/EquipoConsumidor'
+        - name: plantaId
+          in: query
+          required: false
+          description: Si se indica, devuelve solo la liquidación de esa planta.
+          schema:
+            $ref: '#/components/schemas/Identificador'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Página de liquidaciones del periodo.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginaLiquidaciones'
+              example:
+                periodo: '2026-11'
+                moneda: COP
+                totalConsolidado: 8327725
+                datos:
+                  - id: LIQ-2026-11-PL-001
+                    periodo: '2026-11'
+                    plantaId: PL-001
+                    energiaEntregadaKwh: 12450.5
+                    tarifaPorKwh: 450
+                    valorEnergia: 5602725
+                    costoMantenimiento: 360000
+                    total: 5242725
+                    moneda: COP
+                    generadoEn: '2026-12-01T08:00:00-05:00'
+                  - id: LIQ-2026-11-PL-002
+                    periodo: '2026-11'
+                    plantaId: PL-002
+                    energiaEntregadaKwh: 8300
+                    tarifaPorKwh: 450
+                    valorEnergia: 3735000
+                    costoMantenimiento: 650000
+                    total: 3085000
+                    moneda: COP
+                    generadoEn: '2026-12-01T08:00:00-05:00'
+                total: 2
+                limit: 50
+                offset: 0
+        '400':
+          $ref: '#/components/responses/SolicitudInvalida'
+        '404':
+          $ref: '#/components/responses/NoEncontrado'
+        '429':
+          $ref: '#/components/responses/Sobrecarga'
+        '503':
+          $ref: '#/components/responses/NoDisponible'
+
+  # --------------------------- COMÚN: no modificar ---------------------------
+  /health:
+    get:
+      tags: [Operación]
+      operationId: consultarSalud
+      summary: Comprobar la disponibilidad del servicio y de su base de datos
+      description: No exige `X-Equipo-Consumidor`. Debe responder rápido y sin llamar a otros equipos de forma bloqueante.
+      responses:
+        '200':
+          description: Servicio disponible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Salud'
+              example:
+                estado: disponible
+                baseDatos: ok
+                version: 1.0.0
+                tiempoActivoSeg: 3600
+        '503':
+          description: El servicio no puede acceder a su base de datos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Salud'
+              example:
+                estado: no_disponible
+                baseDatos: error
+                version: 1.0.0
+                tiempoActivoSeg: 3600
+
+  /openapi.yaml:
+    get:
+      tags: [Operación]
+      operationId: obtenerContrato
+      summary: Descargar este contrato
+      description: URL que se registra en la columna "URL del contrato OpenAPI" de la hoja Coordinacion_Voltrix.
+      responses:
+        '200':
+          description: Contrato en formato YAML.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+components:
+  parameters:
+    # COMÚN
+    EquipoConsumidor:
+      name: X-Equipo-Consumidor
+      in: header
+      required: false
+      description: Equipo que hace la llamada. Se registra en los logs como evidencia de consumo entre células.
+      schema:
+        type: string
+        pattern: '^equipo-[1-7]$'
+      example: equipo-2
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Tamaño de página.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    Offset:
+      name: offset
+      in: query
+      required: false
+      description: Número de elementos a omitir.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    Modo:
+      name: modo
+      in: query
+      required: false
+      description: Versión del procesamiento a ejecutar (línea base o técnica paralela/concurrente).
+      schema:
+        type: string
+        enum: [secuencial, paralelo]
+        default: paralelo
+    Workers:
+      name: workers
+      in: query
+      required: false
+      description: Número de hilos, goroutines, procesos o workers a usar en modo paralelo. Por defecto lo decide el servicio.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 64
+    # Propio del servicio
+    PeriodoLiquidacion:
+      name: periodo
+      in: path
+      required: true
+      description: Periodo mensual en formato AAAA-MM.
+      schema:
+        $ref: '#/components/schemas/PeriodoLiquidacion'
+      example: '2026-11'
+
+  headers:
+    # COMÚN
+    X-Request-Id:
+      description: Identificador de la petición, presente también en los logs del servicio.
+      schema:
+        type: string
+        format: uuid
+    Retry-After:
+      description: Segundos que el consumidor debe esperar antes de reintentar.
+      schema:
+        type: integer
+        minimum: 1
+      example: 1
+
+  responses:
+    # COMÚN
+    SolicitudInvalida:
+      description: La solicitud no cumple el contrato.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: SOLICITUD_INVALIDA
+            mensaje: La solicitud no cumple el contrato.
+            requestId: 0a4e9c1d-3f2b-4e8a-b7c6-5d1e2f3a4b5c
+            detalles:
+              - campo: periodo
+                problema: debe tener el formato AAAA-MM
+    NoEncontrado:
+      description: El recurso no existe.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: NO_ENCONTRADO
+            mensaje: No hay liquidaciones generadas para el periodo 2026-10.
+            requestId: 9c2f7e4a-1d3b-4a6c-8e5f-0b7d9a1c3e2f
+    Conflicto:
+      description: Ya existe un recurso con ese identificador o el estado actual impide la operación.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: DUPLICADO
+            mensaje: Ya existe un recurso con el identificador REC-001.
+            requestId: 4d8b2a6e-7c1f-4e3a-9b5d-2f6a8c0e1b4d
+    Sobrecarga:
+      description: Capacidad de admisión agotada. Reintentar después de `Retry-After` segundos.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: SOBRECARGA
+            mensaje: El servicio está atendiendo el máximo de peticiones simultáneas.
+            requestId: 2e7a4c9b-6d1f-4b8e-a3c5-7f0d2b9e4a1c
+    NoDisponible:
+      description: Base de datos o servicio no disponible.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: NO_DISPONIBLE
+            mensaje: No hay conexión con la base de datos.
+            requestId: 8f1b3d5a-2c7e-4f9a-b6d0-1e4c7a9b2d5f
+    DependenciaFallida:
+      description: Un servicio de otro equipo del que se depende no respondió o respondió con error.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            codigo: DEPENDENCIA_FALLIDA
+            mensaje: Mantenimiento Predictivo respondió 503.
+            requestId: 3c6e9f2a-8b1d-4e7c-a5f0-6d2b9e1c4a7f
+            detalles:
+              - campo: equipo-6
+                problema: GET /mantenimiento/ordenes?plantaId=PL-001 respondió 503
+
+  schemas:
+    # ------------------------------- COMÚN -------------------------------
+    Identificador:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[A-Za-z0-9_-]+$'
+      example: PL-001-PS-07
+    Error:
+      type: object
+      additionalProperties: false
+      required: [codigo, mensaje, requestId]
+      properties:
+        codigo:
+          type: string
+          pattern: '^[A-Z_]+$'
+          description: |
+            Código estable en MAYÚSCULAS. Comunes: SOLICITUD_INVALIDA, NO_ENCONTRADO, DUPLICADO,
+            SOBRECARGA, NO_DISPONIBLE, DEPENDENCIA_FALLIDA, ERROR_INTERNO. Cada equipo puede
+            agregar los suyos y documentarlos aquí.
+          example: NO_ENCONTRADO
+        mensaje:
+          type: string
+        requestId:
+          type: string
+        detalles:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [campo, problema]
+            properties:
+              campo:
+                type: string
+              problema:
+                type: string
+    Salud:
+      type: object
+      additionalProperties: false
+      required: [estado, baseDatos]
+      properties:
+        estado:
+          type: string
+          enum: [disponible, no_disponible]
+        baseDatos:
+          type: string
+          enum: [ok, error]
+        version:
+          type: string
+        tiempoActivoSeg:
+          type: integer
+          minimum: 0
+    MetricasProcesamiento:
+      type: object
+      additionalProperties: false
+      required: [modo, workers, elementos, duracionMs]
+      description: Evidencia de cada ejecución intensiva, útil para el benchmark secuencial contra paralelo.
+      properties:
+        modo:
+          type: string
+          enum: [secuencial, paralelo]
+        workers:
+          type: integer
+          minimum: 1
+        elementos:
+          type: integer
+          minimum: 0
+          description: Cantidad de elementos procesados (lecturas, activos, plantas, liquidaciones...).
+        duracionMs:
+          type: integer
+          minimum: 0
+
+    # ------------------------- Propio del servicio -------------------------
+    PeriodoLiquidacion:
+      type: string
+      pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
+      description: Periodo mensual en formato AAAA-MM.
+      example: '2026-11'
+    Moneda:
+      type: string
+      enum: [COP]
+      description: Moneda de todos los valores monetarios.
+    Liquidacion:
+      type: object
+      additionalProperties: false
+      required: [id, periodo, plantaId, energiaEntregadaKwh, tarifaPorKwh, valorEnergia, costoMantenimiento, total, moneda, generadoEn]
+      description: Liquidación de una planta en un periodo.
+      properties:
+        id:
+          $ref: '#/components/schemas/Identificador'
+        periodo:
+          $ref: '#/components/schemas/PeriodoLiquidacion'
+        plantaId:
+          $ref: '#/components/schemas/Identificador'
+        clienteId:
+          type: string
+          nullable: true
+          description: Cliente al que pertenece la planta, si el dato está disponible.
+        energiaEntregadaKwh:
+          type: number
+          minimum: 0
+          description: Energía entregada en el periodo, según Reportes de Generación.
+        tarifaPorKwh:
+          type: number
+          minimum: 0
+          description: Tarifa aplicada, en COP por kWh.
+        valorEnergia:
+          type: number
+          description: energiaEntregadaKwh × tarifaPorKwh.
+        costoMantenimiento:
+          type: number
+          minimum: 0
+          description: Suma de los costos de las órdenes completadas en el periodo, según Mantenimiento Predictivo.
+        total:
+          type: number
+          description: valorEnergia − costoMantenimiento.
+        moneda:
+          $ref: '#/components/schemas/Moneda'
+        generadoEn:
+          type: string
+          format: date-time
+    SolicitudLiquidacion:
+      type: object
+      additionalProperties: false
+      required: [periodo]
+      properties:
+        periodo:
+          $ref: '#/components/schemas/PeriodoLiquidacion'
+        plantaIds:
+          type: array
+          description: Si se omite, se liquidan todas las plantas del periodo.
+          items:
+            $ref: '#/components/schemas/Identificador'
+    ResultadoLiquidacion:
+      type: object
+      additionalProperties: false
+      required: [periodo, generados, totalConsolidado, moneda, metricas]
+      properties:
+        periodo:
+          $ref: '#/components/schemas/PeriodoLiquidacion'
+        generados:
+          type: integer
+          minimum: 0
+          description: Cantidad de liquidaciones generadas (una por planta).
+        totalConsolidado:
+          type: number
+          description: Suma de los totales de todas las liquidaciones generadas.
+        moneda:
+          $ref: '#/components/schemas/Moneda'
+        metricas:
+          $ref: '#/components/schemas/MetricasProcesamiento'
+    PaginaLiquidaciones:
+      type: object
+      additionalProperties: false
+      required: [periodo, moneda, totalConsolidado, datos, total, limit, offset]
+      properties:
+        periodo:
+          $ref: '#/components/schemas/PeriodoLiquidacion'
+        moneda:
+          $ref: '#/components/schemas/Moneda'
+        totalConsolidado:
+          type: number
+          description: Suma de los totales de todas las liquidaciones del periodo, no solo de la página.
+        datos:
+          type: array
+          items:
+            $ref: '#/components/schemas/Liquidacion'
+        total:
+          type: integer
+          minimum: 0
+          description: Cantidad total de liquidaciones del periodo.
+        limit:
+          type: integer
+        offset:
+          type: integer
