@@ -1,0 +1,47 @@
+# API + base de datos. Solo el puerto 8080 de la API se expone al exterior;
+# la base de datos solo es visible dentro de la red interna de Docker.
+services:
+  api:
+    image: ${IMAGEN:-facturacion-liquidacion:local}
+    build: .
+    restart: unless-stopped
+    mem_limit: 400m
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/${DB_NAME:-liquidacion}
+      DB_USER: ${DB_USER:-liquidacion}
+      DB_PASSWORD: ${DB_PASSWORD:?define DB_PASSWORD en .env}
+      TARIFA_POR_KWH: ${TARIFA_POR_KWH:-450}
+      MAX_CONCURRENT_JOBS: ${MAX_CONCURRENT_JOBS:-2}
+      URL_REPORTES: ${URL_REPORTES:-}
+      URL_MANTENIMIENTO: ${URL_MANTENIMIENTO:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      POSTGRES_DB: ${DB_NAME:-liquidacion}
+      POSTGRES_USER: ${DB_USER:-liquidacion}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?define DB_PASSWORD en .env}
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=20"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-liquidacion} -d ${DB_NAME:-liquidacion}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
