@@ -58,18 +58,13 @@ resource "null_resource" "cluster" {
       AWS_SECRET_ACCESS_KEY = "test"
       AWS_DEFAULT_REGION    = "us-east-1"
     }
-    command = <<-EOT
-      aws --endpoint-url ${var.floci_endpoint} eks create-cluster \
-        --name ${var.cluster_name} \
-        --role-arn ${aws_iam_role.cluster.arn} \
-        --resources-vpc-config '{}'
-      aws --endpoint-url ${var.floci_endpoint} eks wait cluster-active --name ${var.cluster_name}
-    EOT
+    command = "aws --endpoint-url ${var.floci_endpoint} eks create-cluster --name ${var.cluster_name} --role-arn ${aws_iam_role.cluster.arn} --resources-vpc-config file://vpc-config.json && aws --endpoint-url ${var.floci_endpoint} eks wait cluster-active --name ${var.cluster_name}"
   }
 
   provisioner "local-exec" {
-    when    = destroy
-    command = "aws --endpoint-url ${self.triggers.endpoint} eks delete-cluster --name ${self.triggers.nombre} || true"
+    when       = destroy
+    on_failure = continue
+    command    = "aws --endpoint-url ${self.triggers.endpoint} eks delete-cluster --name ${self.triggers.nombre}"
     environment = {
       AWS_ACCESS_KEY_ID     = "test"
       AWS_SECRET_ACCESS_KEY = "test"
