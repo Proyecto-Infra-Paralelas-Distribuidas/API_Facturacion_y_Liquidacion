@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
@@ -14,7 +16,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Endpoints comunes a todos los servicios: /health y /openapi.yaml. */
+/** Endpoints comunes a todos los servicios: /, /health y /openapi.yaml. */
 @RestController
 public class OperacionController {
 
@@ -24,6 +26,18 @@ public class OperacionController {
     public OperacionController(LiquidacionRepository repositorio, @Value("${app.version}") String version) {
         this.repositorio = repositorio;
         this.version = version;
+    }
+
+    @GetMapping("/")
+    public Map<String, Object> raiz() {
+        Map<String, Object> cuerpo = new LinkedHashMap<>();
+        cuerpo.put("servicio", "facturacion-liquidacion");
+        cuerpo.put("equipo", "equipo-7");
+        cuerpo.put("version", version);
+        cuerpo.put("openapi", "/openapi.yaml");
+        cuerpo.put("health", "/health");
+        cuerpo.put("hora", OffsetDateTime.now(ZoneOffset.UTC).toString());
+        return cuerpo;
     }
 
     @GetMapping("/health")
